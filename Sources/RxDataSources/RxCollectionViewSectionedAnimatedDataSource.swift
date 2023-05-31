@@ -24,6 +24,9 @@ open class RxCollectionViewSectionedAnimatedDataSource<Section: AnimatableSectio
     // animation configuration
     public var animationConfiguration: AnimationConfiguration
 
+    public var isAnimating: Observable<Bool> { isAnimatingRelay.asObservable() }
+    private var isAnimatingRelay = BehaviorRelay<Bool>(value: false)
+    private let fadeDeleteAnimationTime: TimeInterval?
     /// Calculates view transition depending on type of changes
     public var decideViewTransition: DecideViewTransition
 
@@ -33,10 +36,12 @@ open class RxCollectionViewSectionedAnimatedDataSource<Section: AnimatableSectio
         configureCell: @escaping ConfigureCell,
         configureSupplementaryView: ConfigureSupplementaryView? = nil,
         moveItem: @escaping MoveItem = { _, _, _ in () },
-        canMoveItemAtIndexPath: @escaping CanMoveItemAtIndexPath = { _, _ in false }
+        canMoveItemAtIndexPath: @escaping CanMoveItemAtIndexPath = { _, _ in false },
+        fadeDeleteAnimationTime: TimeInterval? = nil
         ) {
         self.animationConfiguration = animationConfiguration
         self.decideViewTransition = decideViewTransition
+        self.fadeDeleteAnimationTime = fadeDeleteAnimationTime
         super.init(
             configureCell: configureCell,
             configureSupplementaryView: configureSupplementaryView,
@@ -44,13 +49,13 @@ open class RxCollectionViewSectionedAnimatedDataSource<Section: AnimatableSectio
             canMoveItemAtIndexPath: canMoveItemAtIndexPath
         )
     }
-    
+
     // there is no longer limitation to load initial sections with reloadData
     // but it is kept as a feature everyone got used to
     var dataSet = false
 
     open func collectionView(_ collectionView: UICollectionView, observedEvent: Event<Element>) {
-        Binder(self) { dataSource, newSections in
+        Binder(self) { [fadeDeleteAnimationTime, isAnimatingRelay] dataSource, newSections in
             #if DEBUG
                 dataSource._dataSourceBound = true
             #endif
@@ -69,20 +74,39 @@ open class RxCollectionViewSectionedAnimatedDataSource<Section: AnimatableSectio
                 let oldSections = dataSource.sectionModels
                 do {
                     let differences = try Diff.differencesForSectionedView(initialSections: oldSections, finalSections: newSections)
-                    
+
                     switch dataSource.decideViewTransition(dataSource, collectionView, differences) {
                     case .animated:
                         // each difference must be run in a separate 'performBatchUpdates', otherwise it crashes.
                         // this is a limitation of Diff tool
                         for difference in differences {
-                            let updateBlock = {
+                          if difference.deletedItems.count == 1, let fadeDeleteAnimationTime = fadeDeleteAnimationTime, let item = difference.deletedItems.first {
+                            let indexPath = IndexPath(item: item.itemIndex, section: item.sectionIndex)
+                            let cell = collectionView.cellForItem(at: indexPath)
+                            isAnimatingRelay.accept(true)
+                            UIView.animate(withDuration: fadeDeleteAnimationTime, delay: 0, animations: { [cell] in
+                              cell?.alpha = 0
+                            }) { _ in
+                              let updateBlock = {
                                 // sections must be set within updateBlock in 'performBatchUpdates'
                                 dataSource.setSections(difference.finalSections)
                                 collectionView.batchUpdates(difference, animationConfiguration: dataSource.animationConfiguration)
+                              }
+                              collectionView.performBatchUpdates(updateBlock, completion: {  _ in
+                                isAnimatingRelay.accept(false)
+                              })
+                            }
+                          }
+                          else {
+                            let updateBlock = {
+                              // sections must be set within updateBlock in 'performBatchUpdates'
+                              dataSource.setSections(difference.finalSections)
+                              collectionView.batchUpdates(difference, animationConfiguration: dataSource.animationConfiguration)
                             }
                             collectionView.performBatchUpdates(updateBlock, completion: nil)
+                          }
                         }
-                        
+
                     case .reload:
                         dataSource.setSections(newSections)
                         collectionView.reloadData()
